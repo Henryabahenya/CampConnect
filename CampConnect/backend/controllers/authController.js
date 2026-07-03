@@ -2,10 +2,18 @@ const crypto = require("crypto");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const User = require("../models/User");
+const {
+  recordSession,
+  invalidateSession,
+  recordFailedLogin,
+  clearFailedLogins,
+  isAccountLocked,
+} = require("../middleware/sessionMiddleware");
 
 /**
  * POST /api/auth/register
  * Accepts email, phone, password, profilePicture, and full hierarchical camp location.
+ * Validates phone format: +254 7xxxxxx
  * Hashes password with bcrypt before persisting.
  */
 const registerUser = async (req, res) => {
@@ -13,13 +21,30 @@ const registerUser = async (req, res) => {
     const { username, email, phone, password, profilePicture, location } =
       req.body;
 
+    // Validate phone format
+    const phoneRegex = /^\+254\s?7\d{8}$/;
+    if (!phone || !phoneRegex.test(phone)) {
+      return res.status(400).json({
+        message:
+          "Phone number must start with +254 7 followed by 8 digits (e.g., +254 768 407 749)",
+      });
+    }
+
     // Check for existing user by username, email, or phone
     const existingUser = await User.findOne({
       $or: [{ username }, { email }, { phone }],
     });
 
     if (existingUser) {
-      return res.status(400).json({ message: "User already exists" });
+      let errorMsg = "User already exists";
+      if (existingUser.email === email) {
+        errorMsg = "This email is already registered.";
+      } else if (existingUser.phone === phone) {
+        errorMsg = "This phone number is already registered.";
+      } else if (existingUser.username === username) {
+        errorMsg = "This username is already taken.";
+      }
+      return res.status(400).json({ message: errorMsg });
     }
 
     // Hash password securely
@@ -47,6 +72,9 @@ const registerUser = async (req, res) => {
       { expiresIn: "7d" },
     );
 
+    // Record session in Redis
+    await recordSession(user._id, token);
+
     const userObj = user.toObject();
     delete userObj.password;
     delete userObj.resetToken;
@@ -59,6 +87,13 @@ const registerUser = async (req, res) => {
       const messages = Object.values(err.errors).map((e) => e.message);
       return res.status(400).json({ message: messages.join(". ") });
     }
+    // Handle duplicate key errors
+    if (err.code === 11000) {
+      const field = Object.keys(err.keyPattern)[0];
+      return res.status(400).json({
+        message: `This ${field} is already in use. Please try another.`,
+      });
+    }
     console.error("Register error:", err);
     return res.status(500).json({ message: "Server error" });
   }
@@ -67,6 +102,8 @@ const registerUser = async (req, res) => {
 /**
  * POST /api/auth/login
  * Verifies credentials and issues a secure JWT token.
+ * Provides specific error messages for non-existent users and wrong passwords.
+ * Tracks sessions in Redis and prevents brute-force attacks.
  */
 const loginUser = async (req, res) => {
   try {
@@ -78,10 +115,23 @@ const loginUser = async (req, res) => {
         .json({ message: "Email and password are required" });
     }
 
+    // Check if account is locked due to too many failed attempts
+    const locked = await isAccountLocked(email);
+    if (locked) {
+      return res.status(429).json({
+        message:
+          "Too many failed login attempts. Please try again later or reset your password.",
+      });
+    }
+
     const user = await User.findOne({ email });
 
     if (!user) {
-      return res.status(400).json({ message: "Invalid credentials" });
+      await recordFailedLogin(email);
+      return res.status(404).json({
+        message:
+          "This account does not exist. Please check your email or register a new account.",
+      });
     }
 
     // Check account status
@@ -94,14 +144,24 @@ const loginUser = async (req, res) => {
     const isMatch = await bcrypt.compare(password, user.password);
 
     if (!isMatch) {
-      return res.status(400).json({ message: "Invalid credentials" });
+      await recordFailedLogin(email);
+      return res.status(401).json({
+        message:
+          "You have entered a wrong password. Please check and try again.",
+      });
     }
+
+    // Clear failed login attempts on successful login
+    await clearFailedLogins(email);
 
     const token = jwt.sign(
       { id: user._id, role: user.role },
       process.env.JWT_SECRET,
       { expiresIn: "7d" },
     );
+
+    // Record session in Redis
+    await recordSession(user._id, token);
 
     const userObj = user.toObject();
     delete userObj.password;
@@ -306,9 +366,35 @@ const updateProfile = async (req, res) => {
   }
 };
 
+/**
+ * POST /api/auth/logout
+ * Invalidates the user session stored in Redis.
+ */
+const logoutUser = async (req, res) => {
+  try {
+    const userId = req.user?.id;
+
+    if (!userId) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    // Invalidate session in Redis
+    await invalidateSession(userId);
+
+    // Clear token from localStorage (client-side instruction)
+    return res.status(200).json({
+      message: "Logged out successfully",
+    });
+  } catch (err) {
+    console.error("Logout error:", err);
+    return res.status(500).json({ message: "Server error" });
+  }
+};
+
 module.exports = {
   registerUser,
   loginUser,
+  logoutUser,
   forgotPassword,
   resetPassword,
   updateProfile,

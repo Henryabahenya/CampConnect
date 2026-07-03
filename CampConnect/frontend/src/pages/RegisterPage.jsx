@@ -1,10 +1,10 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { useMockAuth } from "../context/MockAuthContext";
 
 /**
  * CampConnect - Registration Page
  * Professional multi-section form with hierarchical camp location selectors.
+ * Uses backend API for user registration with phone validation.
  */
 const RegisterPage = () => {
   const [form, setForm] = useState({
@@ -23,7 +23,7 @@ const RegisterPage = () => {
     houseNumber: "",
   });
   const [error, setError] = useState("");
-  const { register } = useMockAuth();
+  const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
 
   const handleChange = (e) => {
@@ -46,10 +46,11 @@ const RegisterPage = () => {
     });
   };
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
     setError("");
 
+    // Frontend validation
     if (!form.username || !form.email || !form.phone || !form.password) {
       setError("Please fill in all required fields.");
       return;
@@ -65,33 +66,64 @@ const RegisterPage = () => {
       return;
     }
 
+    // Validate phone format
+    const phoneRegex = /^\+254\s?7\d{8}$/;
+    if (!phoneRegex.test(form.phone)) {
+      setError(
+        "Phone number must start with +254 7 followed by 8 digits (e.g., +254 768 407 749)",
+      );
+      return;
+    }
+
     if (!form.campSystem) {
       setError("Please select your camp system.");
       return;
     }
 
-    const result = register({
-      username: form.username,
-      email: form.email,
-      phone: form.phone,
-      password: form.password,
-      location: {
-        campSystem: form.campSystem,
-        sector: form.sector || "None",
-        specificLocation: {
-          zone: form.zone,
-          block: form.block,
-          neighborhood: form.neighborhood,
-          compound: form.compound,
-          houseNumber: form.houseNumber,
-        },
-      },
-    });
+    setLoading(true);
 
-    if (result.success) {
+    try {
+      const apiBase =
+        import.meta.env.VITE_API_BASE_URL || "http://localhost:5000";
+      const response = await fetch(`${apiBase}/api/auth/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: form.username,
+          email: form.email,
+          phone: form.phone,
+          password: form.password,
+          location: {
+            campSystem: form.campSystem,
+            sector: form.sector || "None",
+            specificLocation: {
+              zone: form.zone,
+              block: form.block,
+              neighborhood: form.neighborhood,
+              compound: form.compound,
+              houseNumber: form.houseNumber,
+            },
+          },
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        setError(data.message || "Registration failed. Please try again.");
+        return;
+      }
+
+      // Store token and user
+      localStorage.setItem("campconnect_token", data.token);
+      localStorage.setItem("campconnect_user", JSON.stringify(data.user));
+
       navigate("/dashboard");
-    } else {
-      setError(result.message);
+    } catch (err) {
+      console.error("Register error:", err);
+      setError("Network error. Please check your connection.");
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -139,8 +171,9 @@ const RegisterPage = () => {
                   name="username"
                   value={form.username}
                   onChange={handleChange}
+                  disabled={loading}
                   placeholder="Choose a username"
-                  className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-blue-600 focus:ring-1 focus:ring-blue-600 focus:outline-none transition"
+                  className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-blue-600 focus:ring-1 focus:ring-blue-600 focus:outline-none transition disabled:bg-gray-100"
                 />
               </div>
 
@@ -155,8 +188,9 @@ const RegisterPage = () => {
                     name="email"
                     value={form.email}
                     onChange={handleChange}
+                    disabled={loading}
                     placeholder="you@example.com"
-                    className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-blue-600 focus:ring-1 focus:ring-blue-600 focus:outline-none transition"
+                    className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-blue-600 focus:ring-1 focus:ring-blue-600 focus:outline-none transition disabled:bg-gray-100"
                   />
                 </div>
                 <div>
@@ -168,8 +202,9 @@ const RegisterPage = () => {
                     name="phone"
                     value={form.phone}
                     onChange={handleChange}
-                    placeholder="+254 7XX XXX XXX"
-                    className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-blue-600 focus:ring-1 focus:ring-blue-600 focus:outline-none transition"
+                    disabled={loading}
+                    placeholder="+254 768 407 749"
+                    className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-blue-600 focus:ring-1 focus:ring-blue-600 focus:outline-none transition disabled:bg-gray-100"
                   />
                 </div>
               </div>
@@ -185,8 +220,9 @@ const RegisterPage = () => {
                     name="password"
                     value={form.password}
                     onChange={handleChange}
+                    disabled={loading}
                     placeholder="Min. 6 characters"
-                    className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-blue-600 focus:ring-1 focus:ring-blue-600 focus:outline-none transition"
+                    className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-blue-600 focus:ring-1 focus:ring-blue-600 focus:outline-none transition disabled:bg-gray-100"
                   />
                 </div>
                 <div>
@@ -198,6 +234,7 @@ const RegisterPage = () => {
                     name="confirmPassword"
                     value={form.confirmPassword}
                     onChange={handleChange}
+                    disabled={loading}
                     placeholder="Re-enter password"
                     className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-blue-600 focus:ring-1 focus:ring-blue-600 focus:outline-none transition"
                   />

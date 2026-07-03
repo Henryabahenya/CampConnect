@@ -64,6 +64,10 @@ const userSchema = new mongoose.Schema(
       required: [true, "Phone number is required"],
       unique: true,
       trim: true,
+      match: [
+        /^\+254\s?7\d{8}$/,
+        "Phone number must start with +254 7 followed by 8 digits (e.g., +254 768 407 749)",
+      ],
     },
     password: {
       type: String,
