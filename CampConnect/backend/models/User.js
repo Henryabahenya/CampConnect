@@ -1,6 +1,5 @@
 const mongoose = require("mongoose");
 
-// --- Location sub-document schema ---
 const specificLocationSchema = new mongoose.Schema(
   {
     zone: { type: String, trim: true, default: "" },
@@ -41,9 +40,14 @@ const locationSchema = new mongoose.Schema(
   { _id: false },
 );
 
-// --- Main User schema ---
 const userSchema = new mongoose.Schema(
   {
+    name: {
+      type: String,
+      required: [true, "Full name is required"],
+      trim: true,
+      minlength: [3, "Name must be at least 3 characters"],
+    },
     username: {
       type: String,
       required: [true, "Username is required"],
@@ -59,7 +63,7 @@ const userSchema = new mongoose.Schema(
       lowercase: true,
       match: [/^\S+@\S+\.\S+$/, "Please provide a valid email address"],
     },
-    phone: {
+    phoneNumber: {
       type: String,
       required: [true, "Phone number is required"],
       unique: true,
@@ -73,11 +77,15 @@ const userSchema = new mongoose.Schema(
       type: String,
       required: [true, "Password is required"],
       minlength: [6, "Password must be at least 6 characters"],
+      select: false,
+    },
+    avatarUrl: {
+      type: String,
+      default: "",
     },
     profilePicture: {
       type: String,
-      default:
-        "https://ui-avatars.com/api/?name=User&background=1e3a5f&color=fff",
+      default: "",
     },
     role: {
       type: String,
@@ -92,6 +100,38 @@ const userSchema = new mongoose.Schema(
     location: {
       type: locationSchema,
       required: [true, "Location is required"],
+    },
+    sector: {
+      type: String,
+      enum: [
+        "Kakuma 1",
+        "Kakuma 2",
+        "Kakuma 3",
+        "Kakuma 4",
+        "Village 1",
+        "Village 2",
+        "Village 3",
+        "None",
+      ],
+      required: [true, "Sector is required"],
+    },
+    zone: {
+      type: String,
+      required: [true, "Zone is required"],
+      trim: true,
+    },
+    block: {
+      type: String,
+      required: [true, "Block is required"],
+      trim: true,
+    },
+    profileUpdatesThisMonth: {
+      type: Number,
+      default: 0,
+    },
+    lastProfileUpdateMonth: {
+      type: Number,
+      default: new Date().getMonth(),
     },
     resetToken: {
       type: String,
@@ -112,17 +152,32 @@ const userSchema = new mongoose.Schema(
       default: [],
     },
   },
-  { timestamps: true },
+  {
+    timestamps: true,
+    toJSON: { virtuals: true },
+    toObject: { virtuals: true },
+  },
 );
 
-// --- Location validation: enforce sector matches campSystem ---
+userSchema.virtual("phone").get(function () {
+  return this.phoneNumber;
+});
+
+const kakumaSectors = ["Kakuma 1", "Kakuma 2", "Kakuma 3", "Kakuma 4"];
+const kalobeyeiSectors = ["Village 1", "Village 2", "Village 3"];
+
 userSchema.pre("validate", function () {
+  if (!this.name && this.username) {
+    this.name = this.username;
+  }
+
+  if (!this.avatarUrl && this.profilePicture) {
+    this.avatarUrl = this.profilePicture;
+  }
+
   if (!this.location) return;
 
   const { campSystem, sector } = this.location;
-
-  const kakumaSectors = ["Kakuma 1", "Kakuma 2", "Kakuma 3", "Kakuma 4"];
-  const kalobeyeiSectors = ["Village 1", "Village 2", "Village 3"];
 
   if (campSystem === "Kakuma" && !kakumaSectors.includes(sector)) {
     this.invalidate(

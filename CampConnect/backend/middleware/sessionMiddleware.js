@@ -1,40 +1,36 @@
 const { redisClient } = require("../config/redis");
 
-/**
- * Session Middleware
- * Tracks active sessions in Redis
- * Used to enforce single-session or rate-limit login attempts
- */
+const DEFAULT_SESSION_TTL_SECONDS = 24 * 60 * 60;
 
 /**
- * Record user session in Redis
- * TTL: 7 days (matches JWT expiry)
+ * Session Middleware
+ * Tracks token whitelist state and failed login attempts in Redis.
  */
-const recordSession = async (userId, token) => {
+
+const recordSession = async (
+  userId,
+  token,
+  ttl = DEFAULT_SESSION_TTL_SECONDS,
+) => {
   if (!redisClient) {
     console.warn("Redis not available for session tracking");
     return;
   }
 
   try {
+    const tokenKey = `token:${userId}`;
     const sessionKey = `session:${userId}`;
-    await redisClient.setex(
+    await redisClient.set(tokenKey, token, { EX: ttl });
+    await redisClient.set(
       sessionKey,
-      7 * 24 * 60 * 60, // 7 days
-      JSON.stringify({
-        userId,
-        token,
-        createdAt: new Date().toISOString(),
-      }),
+      JSON.stringify({ userId, token, createdAt: new Date().toISOString() }),
+      { EX: ttl },
     );
   } catch (err) {
     console.error("Error recording session:", err);
   }
 };
 
-/**
- * Retrieve user session from Redis
- */
 const getSession = async (userId) => {
   if (!redisClient) return null;
 
@@ -48,35 +44,39 @@ const getSession = async (userId) => {
   }
 };
 
-/**
- * Invalidate user session in Redis (logout)
- */
+const getWhitelistedToken = async (userId) => {
+  if (!redisClient) return null;
+
+  try {
+    const tokenKey = `token:${userId}`;
+    return await redisClient.get(tokenKey);
+  } catch (err) {
+    console.error("Error retrieving whitelisted token:", err);
+    return null;
+  }
+};
+
 const invalidateSession = async (userId) => {
   if (!redisClient) return;
 
   try {
+    const tokenKey = `token:${userId}`;
     const sessionKey = `session:${userId}`;
-    await redisClient.del(sessionKey);
+    await redisClient.del(tokenKey, sessionKey);
   } catch (err) {
     console.error("Error invalidating session:", err);
   }
 };
 
-/**
- * Track failed login attempts to prevent brute force
- */
 const recordFailedLogin = async (email) => {
-  if (!redisClient) return;
+  if (!redisClient) return 0;
 
   try {
     const attemptKey = `failed_login:${email}`;
     const attempts = await redisClient.incr(attemptKey);
-
-    // Set expiry on first attempt (1 hour window)
     if (attempts === 1) {
       await redisClient.expire(attemptKey, 3600);
     }
-
     return attempts;
   } catch (err) {
     console.error("Error recording failed login:", err);
@@ -84,30 +84,22 @@ const recordFailedLogin = async (email) => {
   }
 };
 
-/**
- * Clear failed login attempts on successful login
- */
 const clearFailedLogins = async (email) => {
   if (!redisClient) return;
 
   try {
-    const attemptKey = `failed_login:${email}`;
-    await redisClient.del(attemptKey);
+    await redisClient.del(`failed_login:${email}`);
   } catch (err) {
     console.error("Error clearing failed logins:", err);
   }
 };
 
-/**
- * Check if account is locked due to too many failed attempts
- */
 const isAccountLocked = async (email, maxAttempts = 5) => {
   if (!redisClient) return false;
 
   try {
-    const attemptKey = `failed_login:${email}`;
-    const attempts = await redisClient.get(attemptKey);
-    return parseInt(attempts || 0) >= maxAttempts;
+    const attempts = await redisClient.get(`failed_login:${email}`);
+    return parseInt(attempts || 0, 10) >= maxAttempts;
   } catch (err) {
     console.error("Error checking account lock:", err);
     return false;
@@ -117,6 +109,7 @@ const isAccountLocked = async (email, maxAttempts = 5) => {
 module.exports = {
   recordSession,
   getSession,
+  getWhitelistedToken,
   invalidateSession,
   recordFailedLogin,
   clearFailedLogins,

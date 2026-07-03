@@ -6,6 +6,7 @@ const {
   forgotPassword,
   resetPassword,
   updateProfile,
+  getCurrentUser,
 } = require("../controllers/authController");
 const authMiddleware = require("../middleware/authMiddleware");
 const upload = require("../middleware/upload");
@@ -14,6 +15,7 @@ const User = require("../models/User");
 router.post("/register", registerUser);
 router.post("/login", loginUser);
 router.post("/logout", authMiddleware, logoutUser);
+router.get("/me", authMiddleware, getCurrentUser);
 router.post("/forgot-password", forgotPassword);
 router.post("/reset-password", resetPassword);
 router.put(

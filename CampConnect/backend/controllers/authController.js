@@ -10,36 +10,59 @@ const {
   isAccountLocked,
 } = require("../middleware/sessionMiddleware");
 
+const JWT_EXPIRES_IN = "1d";
+const JWT_TTL_SECONDS = 24 * 60 * 60;
+const PHONE_REGEX = /^\+254\s?7\d{8}$/;
+
+const signToken = (id) =>
+  jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+
+const normalizePhone = (value) => {
+  if (!value || typeof value !== "string") return null;
+  return value.trim();
+};
+
 /**
  * POST /api/auth/register
- * Accepts email, phone, password, profilePicture, and full hierarchical camp location.
- * Validates phone format: +254 7xxxxxx
- * Hashes password with bcrypt before persisting.
+ * Accepts email, phoneNumber, password, profilePicture, and hierarchical camp location.
+ * Validates phone format and hashes password with bcrypt before persisting.
  */
 const registerUser = async (req, res) => {
   try {
-    const { username, email, phone, password, profilePicture, location } =
-      req.body;
+    const {
+      username,
+      name,
+      email,
+      phone,
+      phoneNumber,
+      password,
+      profilePicture,
+      location,
+    } = req.body;
 
-    // Validate phone format
-    const phoneRegex = /^\+254\s?7\d{8}$/;
-    if (!phone || !phoneRegex.test(phone)) {
+    const normalizedPhone = normalizePhone(phoneNumber || phone);
+    if (!normalizedPhone || !PHONE_REGEX.test(normalizedPhone)) {
       return res.status(400).json({
         message:
           "Phone number must start with +254 7 followed by 8 digits (e.g., +254 768 407 749)",
       });
     }
 
-    // Check for existing user by username, email, or phone
+    const normalizedEmail = email ? email.toLowerCase().trim() : null;
+
     const existingUser = await User.findOne({
-      $or: [{ username }, { email }, { phone }],
+      $or: [
+        { username },
+        { email: normalizedEmail },
+        { phoneNumber: normalizedPhone },
+      ],
     });
 
     if (existingUser) {
       let errorMsg = "User already exists";
-      if (existingUser.email === email) {
+      if (existingUser.email === normalizedEmail) {
         errorMsg = "This email is already registered.";
-      } else if (existingUser.phone === phone) {
+      } else if (existingUser.phoneNumber === normalizedPhone) {
         errorMsg = "This phone number is already registered.";
       } else if (existingUser.username === username) {
         errorMsg = "This username is already taken.";
@@ -47,35 +70,26 @@ const registerUser = async (req, res) => {
       return res.status(400).json({ message: errorMsg });
     }
 
-    // Hash password securely
     const salt = await bcrypt.genSalt(12);
     const hashedPassword = await bcrypt.hash(password, salt);
 
     const userData = {
       username,
-      email,
-      phone,
+      name: name || username,
+      email: normalizedEmail,
+      phoneNumber: normalizedPhone,
       password: hashedPassword,
+      profilePicture: profilePicture || "",
+      avatarUrl: profilePicture || "",
       location,
     };
 
-    // Optional profile picture
-    if (profilePicture) {
-      userData.profilePicture = profilePicture;
-    }
-
     const user = await User.create(userData);
 
-    const token = jwt.sign(
-      { id: user._id, role: user.role },
-      process.env.JWT_SECRET,
-      { expiresIn: "7d" },
-    );
+    const token = signToken(user._id);
+    await recordSession(user._id, token, JWT_TTL_SECONDS);
 
-    // Record session in Redis
-    await recordSession(user._id, token);
-
-    const userObj = user.toObject();
+    const userObj = user.toObject({ virtuals: true });
     delete userObj.password;
     delete userObj.resetToken;
     delete userObj.resetTokenExpires;
@@ -107,16 +121,27 @@ const registerUser = async (req, res) => {
  */
 const loginUser = async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const identifier =
+      req.body.email || req.body.phone || req.body.identifier || "";
+    const password = req.body.password;
 
-    if (!email || !password) {
+    if (!identifier || !password) {
       return res
         .status(400)
-        .json({ message: "Email and password are required" });
+        .json({ message: "Email or phone and password are required" });
     }
 
-    // Check if account is locked due to too many failed attempts
-    const locked = await isAccountLocked(email);
+    const normalizedIdentifier = identifier.trim();
+    const query = normalizedIdentifier.includes("@")
+      ? { email: normalizedIdentifier.toLowerCase() }
+      : {
+          $or: [
+            { email: normalizedIdentifier.toLowerCase() },
+            { phoneNumber: normalizedIdentifier },
+          ],
+        };
+
+    const locked = await isAccountLocked(normalizedIdentifier);
     if (locked) {
       return res.status(429).json({
         message:
@@ -124,17 +149,14 @@ const loginUser = async (req, res) => {
       });
     }
 
-    const user = await User.findOne({ email });
-
+    const user = await User.findOne(query);
     if (!user) {
-      await recordFailedLogin(email);
-      return res.status(404).json({
-        message:
-          "This account does not exist. Please check your email or register a new account.",
+      await recordFailedLogin(normalizedIdentifier);
+      return res.status(401).json({
+        message: "Invalid credentials",
       });
     }
 
-    // Check account status
     if (user.status === "Suspended") {
       return res
         .status(403)
@@ -142,28 +164,17 @@ const loginUser = async (req, res) => {
     }
 
     const isMatch = await bcrypt.compare(password, user.password);
-
     if (!isMatch) {
-      await recordFailedLogin(email);
-      return res.status(401).json({
-        message:
-          "You have entered a wrong password. Please check and try again.",
-      });
+      await recordFailedLogin(normalizedIdentifier);
+      return res.status(401).json({ message: "Invalid credentials" });
     }
 
-    // Clear failed login attempts on successful login
-    await clearFailedLogins(email);
+    await clearFailedLogins(normalizedIdentifier);
 
-    const token = jwt.sign(
-      { id: user._id, role: user.role },
-      process.env.JWT_SECRET,
-      { expiresIn: "7d" },
-    );
+    const token = signToken(user._id);
+    await recordSession(user._id, token, JWT_TTL_SECONDS);
 
-    // Record session in Redis
-    await recordSession(user._id, token);
-
-    const userObj = user.toObject();
+    const userObj = user.toObject({ virtuals: true });
     delete userObj.password;
     delete userObj.resetToken;
     delete userObj.resetTokenExpires;
@@ -391,10 +402,26 @@ const logoutUser = async (req, res) => {
   }
 };
 
+/**
+ * GET /api/auth/me
+ * Returns the currently authenticated user (from auth middleware)
+ */
+const getCurrentUser = async (req, res) => {
+  try {
+    const user = req.user;
+    if (!user) return res.status(401).json({ message: "Unauthorized" });
+    return res.status(200).json(user);
+  } catch (err) {
+    console.error("Get current user error:", err);
+    return res.status(500).json({ message: "Server error" });
+  }
+};
+
 module.exports = {
   registerUser,
   loginUser,
   logoutUser,
+  getCurrentUser,
   forgotPassword,
   resetPassword,
   updateProfile,
